@@ -1,0 +1,5 @@
+# macOS
+.DS_Store
+
+# Pi local agent state
+.pi/
