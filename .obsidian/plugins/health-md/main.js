@@ -9590,6 +9590,82 @@ var import_obsidian5 = require("obsidian");
 // src/data-loader.ts
 var import_obsidian = require("obsidian");
 
+// src/data-folder-layout.ts
+var SUPPORTED_DATA_EXTENSIONS = ["json", "csv", "md"];
+var DEFAULT_CUSTOM_DATA_FOLDER_PATH_TEMPLATE = "{year}/{month}/{day}";
+var DATA_FOLDER_PATH_TEMPLATE_VARIABLES = [
+  "year",
+  "month",
+  "week",
+  "day",
+  "date"
+];
+var MAX_CUSTOM_DATA_FOLDER_DEPTH = 8;
+var PREDEFINED_DATA_FOLDER_MAX_DEPTH = {
+  flat: 0,
+  year: 1,
+  month: 2,
+  week: 3,
+  day: 4
+};
+function dataFolderMaxDepth(granularity, customTemplate = DEFAULT_CUSTOM_DATA_FOLDER_PATH_TEMPLATE) {
+  if (granularity === "custom") {
+    return customDataFolderPathTemplateDepth(customTemplate);
+  }
+  return PREDEFINED_DATA_FOLDER_MAX_DEPTH[granularity];
+}
+function customDataFolderPathTemplateDepth(template) {
+  const normalized = normalizeDataFolderPathTemplate(template);
+  if (!normalized) return 0;
+  return Math.min(normalized.split("/").length, MAX_CUSTOM_DATA_FOLDER_DEPTH);
+}
+function normalizeDataFolderPathTemplate(template) {
+  const normalized = stripPathControlCharacters(
+    template.trim().replace(/\\/g, "/")
+  ).replace(/\/+$/g, "").replace(/^\/+|\/+$/g, "").replace(/\/+/g, "/");
+  const safeSegments = normalized.split("/").map((segment) => segment.trim()).filter((segment) => segment.length > 0 && segment !== "." && segment !== "..").slice(0, MAX_CUSTOM_DATA_FOLDER_DEPTH);
+  return safeSegments.join("/") || DEFAULT_CUSTOM_DATA_FOLDER_PATH_TEMPLATE;
+}
+function isSupportedDataExtension(extension) {
+  return SUPPORTED_DATA_EXTENSIONS.includes(extension);
+}
+function matchesGlob(candidate, pattern) {
+  if (!pattern || pattern === "*" || pattern === "*.*") return true;
+  const regex = new RegExp(
+    "^" + pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$",
+    "i"
+  );
+  return regex.test(candidate);
+}
+function relativePathFromRoot(rootPath, filePath) {
+  const normalizedRoot = rootPath.replace(/\/+$/g, "");
+  if (!normalizedRoot) return filePath;
+  const prefix = `${normalizedRoot}/`;
+  return filePath.startsWith(prefix) ? filePath.slice(prefix.length) : filePath;
+}
+function matchesDataFilePath({
+  name,
+  extension,
+  path,
+  rootPath,
+  pattern
+}) {
+  if (!isSupportedDataExtension(extension)) return false;
+  if (matchesGlob(name, pattern)) return true;
+  return matchesGlob(relativePathFromRoot(rootPath, path), pattern);
+}
+function stripPathControlCharacters(value) {
+  var _a;
+  let result = "";
+  for (const character of value) {
+    const codePoint = (_a = character.codePointAt(0)) != null ? _a : 0;
+    if (codePoint >= 32 && codePoint !== 127) {
+      result += character;
+    }
+  }
+  return result;
+}
+
 // src/parsers/json-parser.ts
 function parseJSON(content) {
   try {
@@ -9944,15 +10020,6 @@ function parseMarkdown(content) {
 }
 
 // src/data-loader.ts
-var SUPPORTED_EXTENSIONS = ["json", "csv", "md"];
-function matchesGlob(filename, pattern) {
-  if (!pattern || pattern === "*" || pattern === "*.*") return true;
-  const regex = new RegExp(
-    "^" + pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$",
-    "i"
-  );
-  return regex.test(filename);
-}
 function detectFormat(extension, configFormat) {
   if (configFormat !== "auto") return configFormat;
   switch (extension) {
@@ -10026,9 +10093,11 @@ var DataLoader = class {
     this.cache = null;
   }
   getDataFiles(pattern) {
+    var _a;
+    const granularity = (_a = this.settings.dataFolderGranularity) != null ? _a : "flat";
     const configuredFolder = this.vault.getAbstractFileByPath(this.settings.dataFolder);
     if (configuredFolder instanceof import_obsidian.TFolder) {
-      const files = this.getMatchingFiles(configuredFolder, pattern);
+      const files = this.getMatchingFiles(configuredFolder, pattern, granularity);
       if (files.length > 0 || this.settings.dataFolder !== "Health") {
         return files;
       }
@@ -10037,19 +10106,56 @@ var DataLoader = class {
       for (const fallbackPath of ["examples/Health", "exports/Health"]) {
         const bundledFolder = this.vault.getAbstractFileByPath(fallbackPath);
         if (bundledFolder instanceof import_obsidian.TFolder) {
-          const files = this.getMatchingFiles(bundledFolder, pattern);
+          const files = this.getMatchingFiles(bundledFolder, pattern, granularity);
           if (files.length > 0) return files;
         }
       }
     }
     return [];
   }
-  getMatchingFiles(folder, pattern) {
-    return folder.children.filter((f) => {
-      if (!(f instanceof import_obsidian.TFile)) return false;
-      if (!SUPPORTED_EXTENSIONS.includes(f.extension)) return false;
-      return matchesGlob(f.name, pattern);
-    }).sort((a, b) => a.path.localeCompare(b.path));
+  getMatchingFiles(folder, pattern, granularity) {
+    const files = [];
+    this.collectMatchingFiles(
+      folder,
+      folder.path,
+      pattern,
+      dataFolderMaxDepth(
+        granularity,
+        this.settings.dataFolderCustomPathTemplate
+      ),
+      0,
+      files
+    );
+    return files.sort((a, b) => a.path.localeCompare(b.path));
+  }
+  collectMatchingFiles(folder, rootPath, pattern, maxDepth, depth, files) {
+    for (const child of folder.children) {
+      if (child instanceof import_obsidian.TFile) {
+        if (this.matchesDataFile(child, rootPath, pattern)) {
+          files.push(child);
+        }
+        continue;
+      }
+      if (child instanceof import_obsidian.TFolder && depth < maxDepth) {
+        this.collectMatchingFiles(
+          child,
+          rootPath,
+          pattern,
+          maxDepth,
+          depth + 1,
+          files
+        );
+      }
+    }
+  }
+  matchesDataFile(file, rootPath, pattern) {
+    return matchesDataFilePath({
+      name: file.name,
+      extension: file.extension,
+      path: file.path,
+      rootPath,
+      pattern
+    });
   }
 };
 function mergeSourcePaths(...pathLists) {
@@ -14218,6 +14324,94 @@ function parseConfig(source) {
   }
   return config;
 }
+var FRONTMATTER_DATE_VARIABLE_KEYS = ["from", "to", "date"];
+var FRONTMATTER_VARIABLE = /^\{([^{}]+)\}$/;
+function frontmatterDateValueToString(value, key) {
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    if (Number.isNaN(ms)) return null;
+    const iso = value.toISOString();
+    const isMidnightUtc = value.getUTCHours() === 0 && value.getUTCMinutes() === 0 && value.getUTCSeconds() === 0 && value.getUTCMilliseconds() === 0;
+    if (key === "date" || isMidnightUtc) return iso.slice(0, 10);
+    return iso.replace(/\.\d{3}Z$/, "Z");
+  }
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return null;
+}
+function parseSimpleFrontmatter(source) {
+  const match = /^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(source);
+  if (!match) return null;
+  const frontmatter = {};
+  for (const line of match[1].split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#") || /^\s/.test(line)) continue;
+    const colonIdx = line.indexOf(":");
+    if (colonIdx === -1) continue;
+    const key = line.slice(0, colonIdx).trim();
+    if (!key) continue;
+    let value = line.slice(colonIdx + 1).trim();
+    if (value.startsWith('"') && value.endsWith('"') || value.startsWith("'") && value.endsWith("'")) {
+      value = value.slice(1, -1);
+    }
+    frontmatter[key] = value;
+  }
+  return frontmatter;
+}
+async function getFrontmatterForContext(plugin, ctx) {
+  var _a;
+  const contextFrontmatter = ctx.frontmatter;
+  const cachedFrontmatter = (_a = plugin.app.metadataCache.getCache(ctx.sourcePath)) == null ? void 0 : _a.frontmatter;
+  const cached = contextFrontmatter != null ? contextFrontmatter : cachedFrontmatter;
+  let parsed = null;
+  if (ctx.sourcePath) {
+    const sourceFile = plugin.app.vault.getAbstractFileByPath(
+      (0, import_obsidian2.normalizePath)(ctx.sourcePath)
+    );
+    if (sourceFile instanceof import_obsidian2.TFile) {
+      try {
+        parsed = parseSimpleFrontmatter(await plugin.app.vault.read(sourceFile));
+      } catch (error) {
+        console.warn("Health.md: failed to read note frontmatter", error);
+      }
+    }
+  }
+  if (parsed && isRecord(cached)) return { ...parsed, ...cached };
+  return cached != null ? cached : parsed;
+}
+function resolveFrontmatterDateVariables(config, frontmatter) {
+  const resolved = { ...config };
+  for (const key of FRONTMATTER_DATE_VARIABLE_KEYS) {
+    const raw = config[key];
+    if (typeof raw !== "string") continue;
+    const match = FRONTMATTER_VARIABLE.exec(raw.trim());
+    if (!match) continue;
+    const variable = match[1].trim();
+    if (!variable) {
+      return { error: `Invalid frontmatter variable in "${key}".` };
+    }
+    if (!isRecord(frontmatter) || !Object.prototype.hasOwnProperty.call(frontmatter, variable)) {
+      return {
+        error: `Missing frontmatter variable "${variable}" for "${key}". Add "${variable}" to this note's frontmatter or use a literal date.`
+      };
+    }
+    const value = frontmatter[variable];
+    const dateValue = frontmatterDateValueToString(value, key);
+    if (!dateValue) {
+      return {
+        error: `Frontmatter variable "${variable}" for "${key}" must be a date or datetime string.`
+      };
+    }
+    if (key === "date") {
+      const parsed = parseBoundary(dateValue, key);
+      if ("error" in parsed) return { error: parsed.error };
+      resolved[key] = parsed.date;
+      continue;
+    }
+    resolved[key] = dateValue;
+  }
+  return { config: resolved };
+}
 var DATE_OR_DATETIME = /^(\d{4}-\d{2}-\d{2})(T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
 function toISODate(d) {
   const y = d.getFullYear();
@@ -14696,14 +14890,21 @@ var VizRenderChild = class extends import_obsidian2.MarkdownRenderChild {
 };
 async function renderCodeBlock(plugin, source, el, ctx) {
   var _a, _b, _c, _d, _e;
-  const config = parseConfig(source);
-  if (!config.type) {
+  const parsedConfig = parseConfig(source);
+  if (!parsedConfig.type) {
     el.createEl("p", {
       text: "Missing type. Example: type: heart-terrain",
       cls: "health-md-error"
     });
     return;
   }
+  const frontmatter = await getFrontmatterForContext(plugin, ctx);
+  const configResolution = resolveFrontmatterDateVariables(parsedConfig, frontmatter);
+  if ("error" in configResolution) {
+    el.createEl("p", { text: configResolution.error, cls: "health-md-error" });
+    return;
+  }
+  const config = configResolution.config;
   const range = resolveDateRange(config);
   if (range.error) {
     el.createEl("p", { text: range.error, cls: "health-md-error" });
@@ -15971,6 +16172,8 @@ var DEFAULT_SETTINGS = {
   dataFolder: "Health",
   filePattern: "*",
   dataFormat: "auto",
+  dataFolderGranularity: "flat",
+  dataFolderCustomPathTemplate: DEFAULT_CUSTOM_DATA_FOLDER_PATH_TEMPLATE,
   theme: "auto",
   defaultWidth: 800,
   defaultHeight: 400,
@@ -15988,8 +16191,19 @@ var DEFAULT_SETTINGS = {
   mapTileAttribution: "\xA9 OpenStreetMap contributors \xA9 CARTO"
 };
 var DATA_POINT_CLICK_ACTIONS = ["pin", "source", "daily"];
+var DATA_FOLDER_GRANULARITIES = [
+  "flat",
+  "year",
+  "month",
+  "week",
+  "day",
+  "custom"
+];
 function isDataPointClickAction(value) {
   return typeof value === "string" && DATA_POINT_CLICK_ACTIONS.includes(value);
+}
+function isDataFolderGranularity(value) {
+  return typeof value === "string" && DATA_FOLDER_GRANULARITIES.includes(value);
 }
 var HealthMdPlugin = class extends import_obsidian5.Plugin {
   constructor() {
@@ -16047,6 +16261,7 @@ var HealthMdPlugin = class extends import_obsidian5.Plugin {
     });
   }
   async loadSettings() {
+    var _a;
     this.settings = Object.assign(
       {},
       DEFAULT_SETTINGS,
@@ -16055,6 +16270,12 @@ var HealthMdPlugin = class extends import_obsidian5.Plugin {
     if (!isDataPointClickAction(this.settings.dataPointClickAction)) {
       this.settings.dataPointClickAction = DEFAULT_SETTINGS.dataPointClickAction;
     }
+    if (!isDataFolderGranularity(this.settings.dataFolderGranularity)) {
+      this.settings.dataFolderGranularity = DEFAULT_SETTINGS.dataFolderGranularity;
+    }
+    this.settings.dataFolderCustomPathTemplate = normalizeDataFolderPathTemplate(
+      (_a = this.settings.dataFolderCustomPathTemplate) != null ? _a : DEFAULT_CUSTOM_DATA_FOLDER_PATH_TEMPLATE
+    );
   }
   async saveSettings() {
     await this.saveData(this.settings);
@@ -16090,9 +16311,33 @@ var HealthMdSettingTab = class extends import_obsidian5.PluginSettingTab {
     super(app, plugin);
     this.plugin = plugin;
   }
+  /**
+   * Obsidian 1.13+ renders getSettingDefinitions() declaratively. Older
+   * Obsidian versions still call display(), so keep an imperative fallback to
+   * preserve compatibility with current stable releases.
+   */
   display() {
     const { containerEl } = this;
     containerEl.empty();
+    this.renderSettingItems(containerEl, this.getSettingDefinitions());
+  }
+  renderSettingItems(containerEl, items) {
+    for (const item of items) {
+      if (item.visible === false) continue;
+      if (typeof item.visible === "function" && !item.visible()) continue;
+      if ("type" in item && (item.type === "group" || item.type === "list")) {
+        if (item.heading) new import_obsidian5.Setting(containerEl).setName(item.heading).setHeading();
+        if (item.items) this.renderSettingItems(containerEl, item.items);
+        continue;
+      }
+      if ("render" in item && typeof item.render === "function") {
+        const setting = new import_obsidian5.Setting(containerEl).setName(item.name);
+        if (item.desc) setting.setDesc(item.desc);
+        item.render(setting, void 0);
+      }
+    }
+  }
+  getSettingDefinitions() {
     const updateDataFolder = async (value) => {
       const next = value.trim().replace(/^\/+|\/+$/g, "");
       if (next === this.plugin.settings.dataFolder) return;
@@ -16101,71 +16346,15 @@ var HealthMdSettingTab = class extends import_obsidian5.PluginSettingTab {
       await this.plugin.saveSettings();
       this.plugin.refreshViews();
     };
-    new import_obsidian5.Setting(containerEl).setName("Data folder").setDesc(
-      "Path to the folder containing health data files. Start typing to pick an existing folder."
-    ).addSearch((search) => {
-      search.setPlaceholder("Health").setValue(this.plugin.settings.dataFolder).onChange(async (value) => {
-        await updateDataFolder(value);
-      });
-      const folderSuggest = new FolderInputSuggest(this.app, search.inputEl);
-      folderSuggest.onSelect((value) => {
-        void updateDataFolder(value);
-      });
-      search.inputEl.addEventListener("focus", () => folderSuggest.open());
-      search.inputEl.addEventListener("click", () => folderSuggest.open());
-    });
-    new import_obsidian5.Setting(containerEl).setName("File pattern").setDesc(
-      "Glob pattern to match files. Use * to include all supported files."
-    ).addText(
-      (text) => text.setPlaceholder("*").setValue(this.plugin.settings.filePattern).onChange(async (value) => {
-        this.plugin.settings.filePattern = value.trim();
-        this.plugin.dataLoader.invalidate();
-        await this.plugin.saveSettings();
-        this.plugin.refreshViews();
-      })
-    );
-    new import_obsidian5.Setting(containerEl).setName("Data format").setDesc(
-      "Automatically detect file format by extension. Markdown and bases files must include YAML frontmatter."
-    ).addDropdown(
-      (dropdown) => dropdown.addOption("auto", "Auto-detect by extension").addOption("json", "JSON").addOption("csv", "CSV").addOption("markdown", "Markdown (YAML frontmatter required)").addOption("bases", "Obsidian bases (YAML frontmatter)").setValue(this.plugin.settings.dataFormat).onChange(async (value) => {
-        this.plugin.settings.dataFormat = value;
-        this.plugin.dataLoader.invalidate();
-        await this.plugin.saveSettings();
-        this.plugin.refreshViews();
-      })
-    );
-    new import_obsidian5.Setting(containerEl).setName("Theme").setDesc("Color theme for visualizations").addDropdown(
-      (dropdown) => dropdown.addOption("auto", "Auto (match Obsidian)").addOption("dark", "Dark").addOption("light", "Light").setValue(this.plugin.settings.theme).onChange(async (value) => {
-        this.plugin.settings.theme = value;
-        await this.plugin.saveSettings();
-        this.plugin.redrawAll();
-      })
-    );
-    new import_obsidian5.Setting(containerEl).setName("Default width").setDesc("Default canvas width in pixels").addText(
-      (text) => text.setValue(String(this.plugin.settings.defaultWidth)).onChange(async (value) => {
-        const num = parseInt(value, 10);
-        if (!isNaN(num) && num > 0) {
-          this.plugin.settings.defaultWidth = num;
-          await this.plugin.saveSettings();
-        }
-      })
-    );
-    new import_obsidian5.Setting(containerEl).setName("Default height").setDesc("Default canvas height in pixels").addText(
-      (text) => text.setValue(String(this.plugin.settings.defaultHeight)).onChange(async (value) => {
-        const num = parseInt(value, 10);
-        if (!isNaN(num) && num > 0) {
-          this.plugin.settings.defaultHeight = num;
-          await this.plugin.saveSettings();
-        }
-      })
-    );
-    new import_obsidian5.Setting(containerEl).setName("Data point click action").setDesc("Choose what happens when clicking a hoverable point in canvas charts.").addDropdown(
-      (dropdown) => dropdown.addOption("pin", "Pin tooltip").addOption("source", "Open source data file").addOption("daily", "Open daily note").setValue(this.plugin.settings.dataPointClickAction).onChange(async (value) => {
-        this.plugin.settings.dataPointClickAction = value;
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian5.Setting(containerEl).setName("Colors").setHeading();
+    const updateCustomPathTemplate = async (value) => {
+      const next = normalizeDataFolderPathTemplate(value);
+      if (next === this.plugin.settings.dataFolderCustomPathTemplate) return;
+      this.plugin.settings.dataFolderCustomPathTemplate = next;
+      this.plugin.dataLoader.invalidate();
+      await this.plugin.saveSettings();
+      this.plugin.refreshViews();
+    };
+    const customTemplateVariables = DATA_FOLDER_PATH_TEMPLATE_VARIABLES.map((variable) => `{${variable}}`).join(", ");
     const colorInputs = {};
     const applyScheme = async (schemeId) => {
       this.plugin.settings.colorScheme = schemeId;
@@ -16190,17 +16379,6 @@ var HealthMdSettingTab = class extends import_obsidian5.PluginSettingTab {
       this.plugin.redrawAll();
     };
     let schemeDropdown;
-    new import_obsidian5.Setting(containerEl).setName("Color scheme").setDesc("Choose a preset palette or customize individual colors below").addDropdown((dropdown) => {
-      Object.keys(COLOR_SCHEMES).forEach((id) => {
-        dropdown.addOption(id, COLOR_SCHEMES[id].label);
-      });
-      dropdown.addOption("custom", "Custom");
-      dropdown.setValue(this.plugin.settings.colorScheme);
-      dropdown.onChange(async (value) => {
-        await applyScheme(value);
-      });
-      schemeDropdown = dropdown.selectEl;
-    });
     const colorSettings = [
       { key: "colorAccent", name: "Accent", desc: "Primary color for activity charts (steps, breathing, rings)" },
       { key: "colorSecondary", name: "Secondary", desc: "Secondary color for calories, asymmetry, and distance" },
@@ -16210,67 +16388,243 @@ var HealthMdSettingTab = class extends import_obsidian5.PluginSettingTab {
       { key: "colorSleepCore", name: "Core sleep", desc: "Color for core sleep stages" },
       { key: "colorSleepAwake", name: "Awake", desc: "Color for awake periods in sleep charts" }
     ];
-    colorSettings.forEach(({ key, name, desc }) => {
-      const setting = new import_obsidian5.Setting(containerEl).setName(name).setDesc(desc);
-      const input = setting.controlEl.createEl("input");
-      input.type = "color";
-      input.value = this.plugin.settings[key];
-      colorInputs[key] = input;
-      input.addEventListener("change", () => {
-        void (async () => {
-          this.plugin.settings[key] = input.value;
-          this.plugin.settings.colorScheme = "custom";
-          if (schemeDropdown) schemeDropdown.value = "custom";
-          await this.plugin.saveSettings();
-          this.plugin.redrawAll();
-        })();
-      });
-    });
-    new import_obsidian5.Setting(containerEl).setName("Workouts").setHeading();
-    new import_obsidian5.Setting(containerEl).setName("Maximum heart rate").setDesc(
-      "Your max heart rate in beats per minute, used to draw heart-rate zone bands on workout charts. Leave blank to skip zone bands. A common estimate is 220 minus your age."
-    ).addText(
-      (text) => text.setPlaceholder("190").setValue(
-        this.plugin.settings.maxHeartRate != null ? String(this.plugin.settings.maxHeartRate) : ""
-      ).onChange(async (value) => {
-        const trimmed = value.trim();
-        if (!trimmed) {
-          this.plugin.settings.maxHeartRate = void 0;
-        } else {
-          const num = parseInt(trimmed, 10);
-          if (Number.isFinite(num) && num > 0) {
-            this.plugin.settings.maxHeartRate = num;
-          }
+    return [
+      {
+        name: "Data folder",
+        desc: "Path to the folder containing health data files. Start typing to pick an existing folder.",
+        render: (setting) => {
+          setting.addSearch((search) => {
+            search.setPlaceholder("Health").setValue(this.plugin.settings.dataFolder).onChange(async (value) => {
+              await updateDataFolder(value);
+            });
+            const folderSuggest = new FolderInputSuggest(this.app, search.inputEl);
+            folderSuggest.onSelect((value) => {
+              void updateDataFolder(value);
+            });
+            search.inputEl.addEventListener("focus", () => folderSuggest.open());
+            search.inputEl.addEventListener("click", () => folderSuggest.open());
+          });
         }
-        await this.plugin.saveSettings();
-        this.plugin.redrawAll();
-      })
-    );
-    new import_obsidian5.Setting(containerEl).setName("Show map tiles").setDesc(
-      "Render workout maps with tile imagery (requires network). When off, the route is drawn as a polyline on a plain background."
-    ).addToggle(
-      (toggle) => toggle.setValue(this.plugin.settings.mapTilesEnabled).onChange(async (value) => {
-        this.plugin.settings.mapTilesEnabled = value;
-        await this.plugin.saveSettings();
-        this.plugin.redrawAll();
-      })
-    );
-    new import_obsidian5.Setting(containerEl).setName("Map tile URL").setDesc(
-      "Leaflet tile URL template. Replace with a different provider's URL if you have your own API key."
-    ).addText(
-      (text) => text.setPlaceholder(DEFAULT_SETTINGS.mapTileUrl).setValue(this.plugin.settings.mapTileUrl).onChange(async (value) => {
-        this.plugin.settings.mapTileUrl = value.trim() || DEFAULT_SETTINGS.mapTileUrl;
-        await this.plugin.saveSettings();
-        this.plugin.redrawAll();
-      })
-    );
-    new import_obsidian5.Setting(containerEl).setName("Map attribution").setDesc("Attribution string shown on the map. Required by most tile providers.").addText(
-      (text) => text.setPlaceholder(DEFAULT_SETTINGS.mapTileAttribution).setValue(this.plugin.settings.mapTileAttribution).onChange(async (value) => {
-        this.plugin.settings.mapTileAttribution = value.trim() || DEFAULT_SETTINGS.mapTileAttribution;
-        await this.plugin.saveSettings();
-        this.plugin.redrawAll();
-      })
-    );
+      },
+      {
+        name: "Data folder structure",
+        desc: "Opt in to nested data folders. Flat keeps the existing direct-file behavior; nested choices scan up to that depth and also keep direct files loadable for gradual migrations.",
+        render: (setting) => {
+          setting.addDropdown(
+            (dropdown) => dropdown.addOption("flat", "Flat (health/file.json)").addOption("year", "Year folders (health/yyyy/file.json)").addOption("month", "Month folders (health/yyyy/mm/file.json)").addOption("week", "Week folders (health/yyyy/w23/file.json)").addOption("day", "Day folders (health/yyyy/mm/dd/file.json)").addOption("custom", "Custom template").setValue(this.plugin.settings.dataFolderGranularity).onChange(async (value) => {
+              this.plugin.settings.dataFolderGranularity = value;
+              this.plugin.dataLoader.invalidate();
+              await this.plugin.saveSettings();
+              this.plugin.refreshViews();
+            })
+          );
+        }
+      },
+      {
+        name: "Custom folder path template",
+        desc: `Used when Data folder structure is Custom. Available variables: ${customTemplateVariables}. Example: {year}/{month}/{day}.`,
+        render: (setting) => {
+          setting.addText(
+            (text) => text.setPlaceholder(DEFAULT_CUSTOM_DATA_FOLDER_PATH_TEMPLATE).setValue(this.plugin.settings.dataFolderCustomPathTemplate).onChange(async (value) => {
+              await updateCustomPathTemplate(value);
+            })
+          );
+        }
+      },
+      {
+        name: "File pattern",
+        desc: "Glob pattern to match file names or nested paths. Use * to include all supported files.",
+        render: (setting) => {
+          setting.addText(
+            (text) => text.setPlaceholder("*").setValue(this.plugin.settings.filePattern).onChange(async (value) => {
+              this.plugin.settings.filePattern = value.trim();
+              this.plugin.dataLoader.invalidate();
+              await this.plugin.saveSettings();
+              this.plugin.refreshViews();
+            })
+          );
+        }
+      },
+      {
+        name: "Data format",
+        desc: "Automatically detect file format by extension. Markdown and bases files must include YAML frontmatter.",
+        render: (setting) => {
+          setting.addDropdown(
+            (dropdown) => dropdown.addOption("auto", "Auto-detect by extension").addOption("json", "JSON").addOption("csv", "CSV").addOption("markdown", "Markdown (YAML frontmatter required)").addOption("bases", "Obsidian bases (YAML frontmatter)").setValue(this.plugin.settings.dataFormat).onChange(async (value) => {
+              this.plugin.settings.dataFormat = value;
+              this.plugin.dataLoader.invalidate();
+              await this.plugin.saveSettings();
+              this.plugin.refreshViews();
+            })
+          );
+        }
+      },
+      {
+        name: "Theme",
+        desc: "Color theme for visualizations",
+        render: (setting) => {
+          setting.addDropdown(
+            (dropdown) => dropdown.addOption("auto", "Auto (match Obsidian)").addOption("dark", "Dark").addOption("light", "Light").setValue(this.plugin.settings.theme).onChange(async (value) => {
+              this.plugin.settings.theme = value;
+              await this.plugin.saveSettings();
+              this.plugin.redrawAll();
+            })
+          );
+        }
+      },
+      {
+        name: "Default width",
+        desc: "Default canvas width in pixels",
+        render: (setting) => {
+          setting.addText(
+            (text) => text.setValue(String(this.plugin.settings.defaultWidth)).onChange(async (value) => {
+              const num = parseInt(value, 10);
+              if (!isNaN(num) && num > 0) {
+                this.plugin.settings.defaultWidth = num;
+                await this.plugin.saveSettings();
+              }
+            })
+          );
+        }
+      },
+      {
+        name: "Default height",
+        desc: "Default canvas height in pixels",
+        render: (setting) => {
+          setting.addText(
+            (text) => text.setValue(String(this.plugin.settings.defaultHeight)).onChange(async (value) => {
+              const num = parseInt(value, 10);
+              if (!isNaN(num) && num > 0) {
+                this.plugin.settings.defaultHeight = num;
+                await this.plugin.saveSettings();
+              }
+            })
+          );
+        }
+      },
+      {
+        name: "Data point click action",
+        desc: "Choose what happens when clicking a hoverable point in canvas charts.",
+        render: (setting) => {
+          setting.addDropdown(
+            (dropdown) => dropdown.addOption("pin", "Pin tooltip").addOption("source", "Open source data file").addOption("daily", "Open daily note").setValue(this.plugin.settings.dataPointClickAction).onChange(async (value) => {
+              this.plugin.settings.dataPointClickAction = value;
+              await this.plugin.saveSettings();
+            })
+          );
+        }
+      },
+      {
+        type: "group",
+        heading: "Colors",
+        items: [
+          {
+            name: "Color scheme",
+            desc: "Choose a preset palette or customize individual colors below",
+            render: (setting) => {
+              setting.addDropdown((dropdown) => {
+                Object.keys(COLOR_SCHEMES).forEach((id) => {
+                  dropdown.addOption(id, COLOR_SCHEMES[id].label);
+                });
+                dropdown.addOption("custom", "Custom");
+                dropdown.setValue(this.plugin.settings.colorScheme);
+                dropdown.onChange(async (value) => {
+                  await applyScheme(value);
+                });
+                schemeDropdown = dropdown.selectEl;
+              });
+            }
+          },
+          ...colorSettings.map(({ key, name, desc }) => ({
+            name,
+            desc,
+            render: (setting) => {
+              const input = setting.controlEl.createEl("input");
+              input.type = "color";
+              input.value = this.plugin.settings[key];
+              colorInputs[key] = input;
+              input.addEventListener("change", () => {
+                void (async () => {
+                  this.plugin.settings[key] = input.value;
+                  this.plugin.settings.colorScheme = "custom";
+                  if (schemeDropdown) schemeDropdown.value = "custom";
+                  await this.plugin.saveSettings();
+                  this.plugin.redrawAll();
+                })();
+              });
+            }
+          }))
+        ]
+      },
+      {
+        type: "group",
+        heading: "Workouts",
+        items: [
+          {
+            name: "Maximum heart rate",
+            desc: "Your max heart rate in beats per minute, used to draw heart-rate zone bands on workout charts. Leave blank to skip zone bands. A common estimate is 220 minus your age.",
+            render: (setting) => {
+              setting.addText(
+                (text) => text.setPlaceholder("190").setValue(
+                  this.plugin.settings.maxHeartRate != null ? String(this.plugin.settings.maxHeartRate) : ""
+                ).onChange(async (value) => {
+                  const trimmed = value.trim();
+                  if (!trimmed) {
+                    this.plugin.settings.maxHeartRate = void 0;
+                  } else {
+                    const num = parseInt(trimmed, 10);
+                    if (Number.isFinite(num) && num > 0) {
+                      this.plugin.settings.maxHeartRate = num;
+                    }
+                  }
+                  await this.plugin.saveSettings();
+                  this.plugin.redrawAll();
+                })
+              );
+            }
+          },
+          {
+            name: "Show map tiles",
+            desc: "Render workout maps with tile imagery (requires network). When off, the route is drawn as a polyline on a plain background.",
+            render: (setting) => {
+              setting.addToggle(
+                (toggle) => toggle.setValue(this.plugin.settings.mapTilesEnabled).onChange(async (value) => {
+                  this.plugin.settings.mapTilesEnabled = value;
+                  await this.plugin.saveSettings();
+                  this.plugin.redrawAll();
+                })
+              );
+            }
+          },
+          {
+            name: "Map tile URL",
+            desc: "Leaflet tile URL template. Replace with a different provider's URL if you have your own API key.",
+            render: (setting) => {
+              setting.addText(
+                (text) => text.setPlaceholder(DEFAULT_SETTINGS.mapTileUrl).setValue(this.plugin.settings.mapTileUrl).onChange(async (value) => {
+                  this.plugin.settings.mapTileUrl = value.trim() || DEFAULT_SETTINGS.mapTileUrl;
+                  await this.plugin.saveSettings();
+                  this.plugin.redrawAll();
+                })
+              );
+            }
+          },
+          {
+            name: "Map attribution",
+            desc: "Attribution string shown on the map. Required by most tile providers.",
+            render: (setting) => {
+              setting.addText(
+                (text) => text.setPlaceholder(DEFAULT_SETTINGS.mapTileAttribution).setValue(this.plugin.settings.mapTileAttribution).onChange(async (value) => {
+                  this.plugin.settings.mapTileAttribution = value.trim() || DEFAULT_SETTINGS.mapTileAttribution;
+                  await this.plugin.saveSettings();
+                  this.plugin.redrawAll();
+                })
+              );
+            }
+          }
+        ]
+      }
+    ];
   }
 };
 /*! Bundled license information:
@@ -16281,5 +16635,3 @@ leaflet/dist/leaflet-src.js:
    * (c) 2010-2023 Vladimir Agafonkin, (c) 2010-2011 CloudMade
    *)
 */
-
-/* nosourcemap */
