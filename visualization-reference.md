@@ -553,7 +553,7 @@ duration and colored by workout type, with inline stats below the chart.
 ```health-viz
 type: workout-log
 to: 2026-05-17
-last: 30
+last: 10
 height: 240
 ```
 

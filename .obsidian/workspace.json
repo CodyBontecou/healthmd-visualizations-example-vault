@@ -11,10 +11,14 @@
             "id": "606daf3d1e95c82a",
             "type": "leaf",
             "state": {
-              "type": "empty",
-              "state": {},
+              "type": "markdown",
+              "state": {
+                "file": "weekly-journal-frontmatter-variables.md",
+                "mode": "source",
+                "source": false
+              },
               "icon": "lucide-file",
-              "title": "New tab"
+              "title": "weekly-journal-frontmatter-variables"
             }
           }
         ]
@@ -176,13 +180,14 @@
       "bases:Create new base": false
     }
   },
-  "active": "d78268d47411961e",
+  "active": "606daf3d1e95c82a",
   "lastOpenFiles": [
+    "visualization-reference.md",
+    "weekly-journal-frontmatter-variables.md",
+    "weekly-overview.md",
     "README.md",
     "daily-dashboard.md",
     "sleep-analysis.md",
-    "weekly-overview.md",
-    "visualization-reference.md",
     "apple-dashboard.md",
     "Health/README.md",
     "Health/2026-12-31.json",
